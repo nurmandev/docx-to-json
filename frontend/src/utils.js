@@ -1,55 +1,24 @@
-const cheerio = require("cheerio");
-const path = require("path");
-const unzipper = require("unzipper");
-const fs = require("fs");
-const rimraf = require("rimraf");
-const cloudinary = require("cloudinary").v2;
+import JSZip from "jszip";
+import * as cheerio from "cheerio";
+import { uploadImage } from "./services/api";
 
-const dotenv = require("dotenv");
-
-dotenv.config();
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-async function uploadToCloudinary(imagePath) {
-  return cloudinary.uploader.upload(imagePath, {
-    folder: "docx", // Optional: specify a folder in Cloudinary
-    use_filename: true, // Use the original filename for the uploaded file
-    unique_filename: true, // Prevents Cloudinary from adding random characters to the filename
-  });
-}
-
-async function extractDocxContent(filePath) {
+export async function extractDocxContent(file) {
   try {
-    const outputDir = path.join(__dirname, "output");
-    await fs.promises.mkdir(outputDir, { recursive: true });
+    // Load the DOCX file (which is a zip) using JSZip
+    const zip = await JSZip.loadAsync(file);
 
-    await fs
-      .createReadStream(filePath)
-      .pipe(unzipper.Extract({ path: outputDir }))
-      .promise();
+    // Extract XML files from the zip
+    const documentXml = await zip.file("word/document.xml").async("text");
+    const stylesXml = await zip.file("word/styles.xml").async("text");
+    const numberingXml = await zip.file("word/numbering.xml").async("text");
 
-    const documentXmlPath = path.join(outputDir, "word", "document.xml");
-    const stylesXmlPath = path.join(outputDir, "word", "styles.xml");
-    const numberingXmlPath = path.join(outputDir, "word", "numbering.xml");
-
-    const documentXml = await fs.promises.readFile(documentXmlPath, "utf8");
-    const stylesXml = await fs.promises.readFile(stylesXmlPath, "utf8");
-    const numberingXml = await fs.promises.readFile(numberingXmlPath, "utf8");
-
+    // Load the XML content with Cheerio
     const $doc = cheerio.load(documentXml, { xmlMode: true });
     const $styles = cheerio.load(stylesXml, { xmlMode: true });
     const $numbering = cheerio.load(numberingXml, { xmlMode: true });
 
     // Build numbering map from numbering.xml
     const numberingMap = buildNumberingMap($numbering);
-
-    // console.log(JSON.stringify(numberingMap));
 
     const styleMap = {};
     $styles("w\\:style").each((_, style) => {
@@ -60,7 +29,7 @@ async function extractDocxContent(filePath) {
         styleMap[styleId] = {
           type: styleType,
           name: $styles(style).find("w\\:name").attr("w:val"),
-          basedOn: $styles(style).find("w\\:basedOn").attr("w:val"), // Capture the basedOn attribute
+          basedOn: $styles(style).find("w\\:basedOn").attr("w:val"),
           runProperties: extractRunStyles($styles(style).find("w\\:rPr")),
           paragraphProperties: extractParagraphStyles(
             $styles(style).find("w\\:pPr")
@@ -198,21 +167,28 @@ async function extractDocxContent(filePath) {
               });
             } else if (runTag === "w:drawing") {
               const imageData = await parseDrawing(run);
-              console.log(imageData);
-              children.push(imageData);
+              if (imageData) {
+                children.push(imageData);
+              }
             }
           }
 
-          paragraphData.text = nextChild
+          // Collect the text from the runs
+          const paragraphText = nextChild
             .filter((child) => child.text)
             .map((child) => child.text)
             .join("");
-          paragraphData.styles = {
-            ...paragraphData.styles,
-            ...nextChild.styles,
-          };
-          paragraphData.styleName = pStyleId;
-          children.push(paragraphData);
+
+          // Only add paragraphData if there is text content
+          if (paragraphText.trim() !== "") {
+            paragraphData.text = paragraphText;
+            paragraphData.styles = {
+              ...paragraphData.styles,
+              ...nextChild.styles,
+            };
+            paragraphData.styleName = pStyleId;
+            children.push(paragraphData);
+          }
         } else if (tag === "w:tbl") {
           const tableData = {
             type: "table",
@@ -342,6 +318,22 @@ async function extractDocxContent(filePath) {
       return numberingMap;
     }
 
+    function removeNullFields(obj) {
+      if (typeof obj === "object" && obj !== null) {
+        Object.keys(obj).forEach((key) => {
+          if (obj[key] === null || obj[key] === undefined) {
+            delete obj[key];
+          } else if (typeof obj[key] === "object") {
+            removeNullFields(obj[key]); // Recursively clean nested objects
+            // If the object becomes empty after cleaning, remove it
+            if (Object.keys(obj[key]).length === 0) {
+              delete obj[key];
+            }
+          }
+        });
+      }
+    }
+
     async function parseDrawing(drawingElement) {
       const anchor = $doc(drawingElement).find("wp\\:anchor");
       const graphicData = $doc(drawingElement).find("a\\:graphicData");
@@ -379,29 +371,34 @@ async function extractDocxContent(filePath) {
       const embedId = blip.attr("r:embed");
 
       if (embedId) {
-        const relsPath = path.join(
-          outputDir,
-          "word",
-          "_rels",
-          "document.xml.rels"
-        );
-        const relsXml = fs.readFileSync(relsPath, "utf8");
+        // Read the document relationships XML
+        const relsXml = await zip
+          .file("word/_rels/document.xml.rels")
+          .async("text");
         const $rels = cheerio.load(relsXml, { xmlMode: true });
 
+        // Find the image's target based on the embedId
         const target = $rels(`Relationship[Id="${embedId}"]`).attr("Target");
         if (target) {
-          const imagePath = path.join(outputDir, "word", target);
+          // Locate the image in the zip
+          const imagePath = `word/${target}`;
+          const imageFile = await zip.file(imagePath).async("blob"); // Get the image as a blob
 
           try {
-            const uploadResult = await uploadToCloudinary(imagePath);
-            imageData.src = uploadResult.secure_url; // Cloudinary secure URL of the uploaded image
+            // Upload image to Cloudinary
+            const uploadResult = await uploadImage(imageFile);
+            imageData.src = uploadResult.url;
           } catch (error) {
             console.error("Error uploading image to Cloudinary:", error);
           }
         }
       }
-      console.log(imageData);
-      return imageData;
+      // Remove any null or empty fields from imageData
+      removeNullFields(imageData);
+      if (imageData.src) {
+        return imageData;
+      }
+      return null;
     }
 
     function extractListInfo(numId, ilvl, numberingMap) {
@@ -418,7 +415,6 @@ async function extractDocxContent(filePath) {
     }
 
     const parsedContent = await parseElement($doc("w\\:document > w\\:body"));
-    rimraf.sync(outputDir);
 
     return mapSections(parsedContent);
   } catch (err) {
@@ -432,65 +428,137 @@ function mapSections(paragraphs) {
   let currentSection = null;
   let currentSubsection = null;
   let preamble = { body: [] };
+  let imageCounter = 1; // To count the figure numbers
 
-  paragraphs.forEach((paragraph) => {
-    const { styleName, text } = paragraph;
-    if (paragraph.type === "image") {
-      console.log("image", paragraph);
+  paragraphs.forEach((paragraph, index) => {
+    const { styleName, text, type, ...otherProperties } = paragraph;
+    // console.log(styleName, text);
+    // Ignore paragraphs with no text
+    if (type === "paragraph" && (!text || text.trim() === "")) {
+      return;
     }
 
-    if (["Heading1", "TGTHEADING1"].includes(styleName)) {
-      if (currentSubsection) {
+    // Handle Heading1 and TGTHEADING1 (Main Section)
+    if (["Heading1", "TGTHEADING1", "a7", "1"].includes(styleName)) {
+      // Push the current subsection to the current section if it has body content
+      if (currentSubsection && currentSubsection.body.length > 0) {
         currentSection.body.push(currentSubsection);
       }
 
-      // If there's an active section, push it to the sections array
-      if (currentSection) {
+      // Push the current section to sections if it has body content
+      if (currentSection && currentSection.body.length > 0) {
         sections.push(currentSection);
       }
 
-      // Start a new main section
+      // Start a new section
       currentSection = {
         title: text,
         body: [],
-        // subsections: [],
       };
 
       // Reset current subsection
       currentSubsection = null;
-    } else if (styleName === "TGTHEADING2" && currentSection) {
-      // If there's an active subsection, push it to the subsections array
-      if (currentSubsection) {
+    }
+    // Handle TGTHEADING2 (Subsection)
+    else if (
+      ["TGTHEADING2", "Heading2", "21"].includes(styleName) &&
+      currentSection
+    ) {
+      // Push the current subsection to the current section if it has body content
+      if (currentSubsection && currentSubsection.body.length > 0) {
         currentSection.body.push(currentSubsection);
       }
 
-      // Start a new subsection within the current section
+      // Start a new subsection
       currentSubsection = {
         title: text,
         body: [],
       };
-    } else if (currentSubsection) {
-      // If there's an active subsection, add body to it
-      currentSubsection.body.push(paragraph);
-    } else if (currentSection) {
-      // If there's no active subsection, add body to the current section
-      currentSection.body.push(paragraph);
-    } else {
-      // If no section has started, add body to the preamble
-      preamble.body.push(paragraph);
+    }
+    // Handle images and check for captions
+    else if (type === "image") {
+      const prevParagraph = paragraphs[index - 1];
+
+      // If the previous paragraph is not a caption, insert a custom caption
+      if (
+        !prevParagraph ||
+        (prevParagraph.styleName !== "Caption" &&
+          prevParagraph.styleName !== "tgtcaption")
+      ) {
+        const customCaption = {
+          type: "Text",
+          value: `Figure ${imageCounter}: Custom caption for image`,
+        };
+
+        if (currentSubsection) {
+          currentSubsection.body.push(customCaption);
+        } else if (currentSection) {
+          currentSection.body.push(customCaption);
+        } else {
+          preamble.body.push(customCaption);
+        }
+
+        imageCounter++; // Increment the image/figure counter
+      }
+
+      // Add the image to the appropriate section
+      if (currentSubsection) {
+        currentSubsection.body.push({
+          value: text,
+          type: "image",
+          ...otherProperties,
+        });
+      } else if (currentSection) {
+        currentSection.body.push({
+          value: text,
+          type: "image",
+          ...otherProperties,
+        });
+      } else {
+        preamble.body.push({
+          value: text,
+          type: "image",
+          ...otherProperties,
+        });
+      }
+    }
+    // Handle adding paragraphs to subsections
+    else if (currentSubsection) {
+      currentSubsection.body.push({
+        value: text,
+        type: type === "paragraph" ? "Text" : type,
+        ...otherProperties,
+      });
+    }
+    // Handle adding paragraphs to sections
+    else if (currentSection) {
+      currentSection.body.push({
+        value: text,
+        type: type === "paragraph" ? "Text" : type,
+        ...otherProperties,
+      });
+    }
+    // Handle preamble before any sections
+    else {
+      preamble.body.push({
+        value: text,
+        type: type === "paragraph" ? "Text" : type,
+        ...otherProperties,
+      });
     }
   });
 
-  // Push the last subsection and section if they exist
-  if (currentSubsection) {
+  // Push the last subsection to the current section if it has body content
+  if (currentSubsection && currentSubsection.body.length > 0) {
     currentSection.body.push(currentSubsection);
   }
 
-  if (currentSection) {
+  // Push the current section to sections if it has body content
+  if (currentSection && currentSection.body.length > 0) {
     sections.push(currentSection);
   }
 
-  // Include preamble if it has any body
+  // Add preamble to sections if it has body content
   if (preamble.body.length > 0) {
     sections.unshift({
       title: "Cover Page",
@@ -500,5 +568,3 @@ function mapSections(paragraphs) {
 
   return sections;
 }
-
-module.exports = { extractDocxContent };
