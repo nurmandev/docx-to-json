@@ -227,6 +227,15 @@ export async function extractDocxContent(file) {
             },
           };
           children.push(sectionData);
+        } else if (tag === "w:sdt") {
+          const drawing = $doc(child).find("w\\:drawing");
+          let imageData = null;
+
+          if (drawing.length > 0) {
+            // Parse the drawing in the <w:r> element
+            imageData = await parseDrawing(drawing);
+          }
+          children.push(imageData);
         }
       }
 
@@ -483,7 +492,8 @@ function mapSections(paragraphs) {
       if (
         !prevParagraph ||
         (prevParagraph.styleName !== "Caption" &&
-          prevParagraph.styleName !== "tgtcaption")
+          prevParagraph.styleName !== "tgtcaption" &&
+          prevParagraph.styleName !== "StyleBodyText75ptBoldCustomColorRGB0")
       ) {
         const customCaption = {
           type: "Text",
@@ -504,19 +514,16 @@ function mapSections(paragraphs) {
       // Add the image to the appropriate section
       if (currentSubsection) {
         currentSubsection.body.push({
-          value: text,
           type: "image",
           ...otherProperties,
         });
       } else if (currentSection) {
         currentSection.body.push({
-          value: text,
           type: "image",
           ...otherProperties,
         });
       } else {
         preamble.body.push({
-          value: text,
           type: "image",
           ...otherProperties,
         });
