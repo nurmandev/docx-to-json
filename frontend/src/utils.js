@@ -110,83 +110,12 @@ export async function extractDocxContent(file) {
         const tag = $doc(child)[0].tagName;
 
         if (tag === "w:p") {
-          const paragraphData = {
-            type: "paragraph",
-            text: "",
-            styles: {},
-          };
-
-          const pPr = $doc(child).find("w\\:pPr");
-          const pStyleId = pPr.find("w\\:pStyle").attr("w:val");
-
-          if (pStyleId && styleMap[pStyleId]) {
-            paragraphData.styles = {
-              ...styleMap[pStyleId].paragraphProperties,
-              ...styleMap[pStyleId].runProperties,
-            };
-          }
-
-          if (pPr.length) {
-            paragraphData.styles = {
-              ...paragraphData.styles,
-              ...extractParagraphStyles(pPr),
-            };
-
-            const numPr = pPr.find("w\\:numPr");
-            if (numPr.length > 0) {
-              const numId = numPr.find("w\\:numId").attr("w:val");
-              const ilvl = numPr.find("w\\:ilvl").attr("w:val");
-
-              const listData = extractListInfo(numId, ilvl, numberingMap);
-              paragraphData.listData = listData;
-            }
-          }
-
-          const nextChild = [];
-          for (const run of $doc(child).find("w\\:r, w\\:drawing, w\\:pict")) {
-            const runTag = $doc(run)[0].tagName;
-
-            if (runTag === "w:r") {
-              const runText = $doc(run).find("w\\:t").text();
-              const rPr = $doc(run).find("w\\:rPr");
-              const rStyleId = rPr.find("w\\:rStyle").attr("w:val");
-              let runStyles = {};
-
-              if (rStyleId && styleMap[rStyleId]) {
-                runStyles = {
-                  ...styleMap[rStyleId].runProperties,
-                };
-              }
-              runStyles = {
-                ...runStyles,
-                ...extractRunStyles(rPr),
-              };
-              nextChild.push({
-                text: runText,
-                styles: runStyles,
-              });
-            } else if (runTag === "w:drawing") {
-              const imageData = await parseDrawing(run);
-              if (imageData) {
-                children.push(imageData);
-              }
-            }
-          }
-
-          // Collect the text from the runs
-          const paragraphText = nextChild
-            .filter((child) => child.text)
-            .map((child) => child.text)
-            .join("");
-
-          // Only add paragraphData if there is text content
-          if (paragraphText.trim() !== "") {
-            paragraphData.text = paragraphText;
-            paragraphData.styles = {
-              ...paragraphData.styles,
-              ...nextChild.styles,
-            };
-            paragraphData.styleName = pStyleId;
+          const paragraphData = await processParagraph(
+            child,
+            styleMap,
+            numberingMap
+          );
+          if (paragraphData) {
             children.push(paragraphData);
           }
         } else if (tag === "w:tbl") {
@@ -228,18 +157,122 @@ export async function extractDocxContent(file) {
           };
           children.push(sectionData);
         } else if (tag === "w:sdt") {
-          const drawing = $doc(child).find("w\\:drawing");
-          let imageData = null;
+          const sdtContent = $doc(child).find("w\\:sdtContent");
 
-          if (drawing.length > 0) {
-            // Parse the drawing in the <w:r> element
-            imageData = await parseDrawing(drawing);
+          for (const sdtChild of sdtContent.children()) {
+            const tag = $doc(sdtChild)[0].tagName;
+
+            if (tag === "w:p") {
+              const paragraphData = await processParagraph(
+                sdtChild,
+                styleMap,
+                numberingMap
+              );
+              if (paragraphData) {
+                children.push(paragraphData);
+              }
+            } else {
+              // console.log(tag);
+            }
           }
-          children.push(imageData);
         }
       }
 
       return children;
+    }
+
+    async function processParagraph(child, styleMap, numberingMap) {
+      const paragraphData = {
+        type: "paragraph",
+        text: "",
+        styles: {},
+      };
+
+      const pPr = $doc(child).find("w\\:pPr");
+      const pStyleId = pPr.find("w\\:pStyle").attr("w:val");
+
+      if (pStyleId && styleMap[pStyleId]) {
+        paragraphData.styles = {
+          ...styleMap[pStyleId].paragraphProperties,
+          ...styleMap[pStyleId].runProperties,
+        };
+      }
+
+      if (pPr.length) {
+        paragraphData.styles = {
+          ...paragraphData.styles,
+          ...extractParagraphStyles(pPr),
+        };
+
+        const numPr = pPr.find("w\\:numPr");
+        if (numPr.length > 0) {
+          const numId = numPr.find("w\\:numId").attr("w:val");
+          const ilvl = numPr.find("w\\:ilvl").attr("w:val");
+
+          const listData = extractListInfo(numId, ilvl, numberingMap);
+          paragraphData.listData = listData;
+        }
+      }
+
+      const nextChild = [];
+      for (const run of $doc(child).find("w\\:r, w\\:drawing, w\\:pict")) {
+        const runData = await processRun(run, styleMap);
+        if (runData) {
+          if (runData.src) {
+            return runData;
+          } else nextChild.push(runData);
+        }
+      }
+
+      const paragraphText = nextChild
+        .filter((child) => child.text)
+        .map((child) => child.text)
+        .join("");
+
+      if (paragraphText.trim() !== "") {
+        paragraphData.text = paragraphText;
+        paragraphData.styles = {
+          ...paragraphData.styles,
+          ...nextChild.styles,
+        };
+        paragraphData.styleName = pStyleId;
+        return paragraphData;
+      }
+
+      return null;
+    }
+
+    async function processRun(run, styleMap) {
+      const runTag = $doc(run)[0].tagName;
+
+      if (runTag === "w:r") {
+        const runText = $doc(run).find("w\\:t").text();
+        const rPr = $doc(run).find("w\\:rPr");
+        const rStyleId = rPr.find("w\\:rStyle").attr("w:val");
+        let runStyles = {};
+
+        if (rStyleId && styleMap[rStyleId]) {
+          runStyles = {
+            ...styleMap[rStyleId].runProperties,
+          };
+        }
+        runStyles = {
+          ...runStyles,
+          ...extractRunStyles(rPr),
+        };
+
+        return {
+          text: runText,
+          styles: runStyles,
+        };
+      } else if (runTag === "w:drawing") {
+        const imageData = await parseDrawing(run);
+        if (imageData) {
+          return imageData;
+        }
+      }
+
+      return null;
     }
 
     function buildNumberingMap($numbering) {
