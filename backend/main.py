@@ -73,27 +73,33 @@ def upload_image():
         file = request.files['file']
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
-        print(file.filename)
+
+        print("Original filename:", file.filename)
+        
         # Secure the file name
         filename = secure_filename(file.filename)
-        print(filename)
+        print("Secured filename:", filename)
+
+        # Check the file mimetype
+        print("File mimetype:", file.mimetype)
 
         # Upload the image to S3
         s3.upload_fileobj(
             file,
             S3_BUCKET,
             filename,
-            # ExtraArgs={"ACL": "public-read"}  # Set the file to be publicly accessible -
+            # ExtraArgs={"ACL": "public-read"}  # Set the file to be publicly accessible
         )
-
 
         # Generate the file URL
         file_url = f"https://{S3_BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{filename}"
+        print("File URL:", file_url)
 
         return jsonify({"message": "Image uploaded successfully", "url": file_url}), 200
     except Exception as e:
         logging.error("Error uploading image to S3", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

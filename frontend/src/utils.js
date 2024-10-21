@@ -426,9 +426,16 @@ export async function extractDocxContent(file) {
           const imagePath = `word/${target}`;
           const imageFile = await zip.file(imagePath).async("blob"); // Get the image as a blob
 
+          // Convert blob to File with filename and MIME type
+          const mimeType = "image/jpeg"; // You might want to dynamically set this based on the image format
+          const fileName = target.split("/").pop(); // Extract the file name from the path
+
+          const imageFileWithMeta = new File([imageFile], fileName, {
+            type: mimeType,
+          });
           try {
-            // Upload image to Cloudinary
-            const uploadResult = await uploadImage(imageFile);
+            // Upload image to S3
+            const uploadResult = await uploadImage(imageFileWithMeta);
             imageData.src = uploadResult.url;
           } catch (error) {
             console.error("Error uploading image to Cloudinary:", error);
